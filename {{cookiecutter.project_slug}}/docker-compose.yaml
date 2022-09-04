@@ -1,37 +1,87 @@
-version: '3'
+version: '3.7'
 services:
-  zookeeper:
-    image: "confluentinc/cp-zookeeper"
-    hostname: zookeeper
+  redpanda:
+    # NOTE: Please use the latest version here!
+    image: vectorized/redpanda:latest
+    container_name: redpanda-1
+    hostname: redpanda-1
+    command:
+    - redpanda start
+    - --smp 1
+    - --reserve-memory 0M
+    - --overprovisioned
+    - --node-id 0
+    - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+    - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://192.168.32.195:9092
+    - --pandaproxy-addr PLAINTEXT://0.0.0.0:28082,OUTSIDE://0.0.0.0:8082
+    - --advertise-pandaproxy-addr PLAINTEXT://redpanda:28082,OUTSIDE://192.168.32.195:8082
     ports:
-      - 32181:32181
-    environment:
-      - ZOOKEEPER_CLIENT_PORT=32181
-  kafka:
-    image: confluentinc/cp-kafka
-    hostname: kafka
-    container_name: kafka
-    ports:
+    - 8081:8081
+    - 8082:8082
     - 9092:9092
+    - 9644:9644
+    - 28082:28082
     - 29092:29092
-    depends_on:
-    - zookeeper
+  redpanda-console:
+    image: vectorized/console:latest
+    container_name: redpanda-console
+    hostname: redpanda-console
+    entrypoint: /bin/sh
+    command: -c "echo \"$$CONSOLE_CONFIG_FILE\" > /tmp/config.yml; /app/console"
     environment:
-      - KAFKA_ZOOKEEPER_CONNECT=zookeeper:32181
-      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
-      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT_HOST://localhost:29092,PLAINTEXT://kafka:9092
-      - KAFKA_BROKER_ID=1 {% if cookiecutter.include_schema_registry.lower() == "y" %}
-  schema-registry:
-    image: confluentinc/cp-schema-registry
-    hostname: schema-registry
-    container_name: schema-registry
-    depends_on:
-      - kafka
-      - zookeeper
+      CONFIG_FILEPATH: /tmp/config.yml
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["redpanda:29092"]
+          schemaRegistry:
+            enabled: true
+            urls: ["http://redpanda:8081"]
+        redpanda:
+          adminApi:
+            enabled: true
+            urls: ["http://redpanda:9644"]
+        connect:
+          enabled: true
+          clusters:
+            - name: local-connect-cluster
+              url: http://connect:8083
     ports:
-      - "8081:8081"
+      - 8080:8080
+    depends_on:
+      - redpanda
+  # Owl Shop is an application that simulates an ecommerce shop that uses Kafka.
+  # It is part of this docker compose so that you have some sample data that you can
+  # browse with Console.
+  owl-shop:
+    image: quay.io/cloudhut/owl-shop:latest
     environment:
-      - SCHEMA_REGISTRY_KAFKASTORE_CONNECTION_URL=zookeeper:32181
-      - SCHEMA_REGISTRY_HOST_NAME=schema-registry
-      - SCHEMA_REGISTRY_DEBUG=true {% endif %}
+      - SHOP_KAFKA_BROKERS=redpanda:29092
+      - SHOP_KAFKA_TOPICREPLICATIONFACTOR=1
+      - SHOP_TRAFFIC_INTERVAL_RATE=1
+      - SHOP_TRAFFIC_INTERVAL_DURATION=0.1s
+    depends_on:
+      - redpanda
+
+  connect:
+    image: docker.cloudsmith.io/redpanda/connectors/connectors:624ff9e
+    hostname: connect
+    container_name: connect
+    depends_on:
+      - redpanda
+    ports:
+      - "8083:8083"
+    environment:
+      KAFKA_CONNECT_CONFIGURATION: |
+        offset.storage.topic=docker-connect-offsets
+        value.converter=org.apache.kafka.connect.json.JsonConverter
+        config.storage.topic=docker-connect-configs
+        key.converter=org.apache.kafka.connect.json.JsonConverter
+        group.id=compose-connect-group
+        status.storage.topic=docker-connect-status
+        config.storage.replication.factor=1
+        offset.storage.replication.factor=1
+        status.storage.replication.factor=1
+      KAFKA_CONNECT_METRICS_ENABLED: "false"
+      KAFKA_CONNECT_BOOTSTRAP_SERVERS: redpanda:29092
+      KAFKA_GC_LOG_ENABLED: "false"
+      KAFKA_HEAP_OPTS: -Xms128M
